@@ -4,13 +4,13 @@
 
 int main() {
     try {
-        DatabaseDiagramGenerator generator("/Users/krotovnikolay/test.db"); //enter absolute path to the sqlite3 database
+        DatabaseDiagramGenerator generator("test.db"); //enter absolute path to the sqlite3 database
         auto tables = generator.getUserTables("main");
         std::cout << "Найденные таблицы в схеме 'main':\n";
         for (const auto& table : tables)
             std::cout << " - " << table << "\n";
         std::string templatePath = "prompt.html"; //enter absolute path of prompt file in this directory
-        std::string outputHtml = ""; //enter absolute path to the result directory
+        std::string outputHtml = "/result"; //enter absolute path to the result directory
         generator.generateHtmlDiagramFile("main", templatePath, outputHtml);
 #ifdef _WIN32
         std::string command = "start " + outputHtml;
