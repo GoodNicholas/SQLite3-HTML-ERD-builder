@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Диаграмма базы данных</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #fff;
+        }
+        #diagram-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background-color: #f9f9f9;
+        }
+        #pan-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            background: transparent;
+            cursor: grab;
+        }
+        .diagram-box {
+            position: absolute;
+            min-width: 150px;
+            background-color: #f0f0f0;
+            border: 2px solid #000;
+            box-sizing: border-box;
+            font-family: sans-serif;
+            z-index: 3;
+            cursor: move;
+            user-select: none;
+            border-radius: 10px;
+            overflow: hidden;
+            padding: 4px;
+            white-space: normal;
+            word-wrap: break-word;
+        }
+        .table-header {
+            background: #ddd;
+            padding: 4px 6px;
+            font-weight: bold;
+            position: relative;
+            white-space: normal;
+            word-wrap: break-word;
+        }
+        .expand-btn {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            width: 16px;
+            height: 16px;
+            background: #888;
+            color: #fff;
+            font-size: 12px;
+            text-align: center;
+            line-height: 16px;
+            cursor: pointer;
+            user-select: none;
+            z-index: 4;
+        }
+        .section {
+            overflow: hidden;
+            transition: max-height 0.3s ease, opacity 0.3s ease;
+        }
+        .section.hidden {
+            max-height: 0;
+            opacity: 0;
+        }
+        .section.visible {
+            max-height: 500px;
+            opacity: 1;
+        }
+        .section-header {
+            padding: 2px 4px;
+            font-size: 12px;
+            font-weight: bold;
+            color: #fff;
+        }
+        .keys-section .section-header {
+            background-color: #3399ff;
+        }
+        .fields-section .section-header {
+            background-color: #66ccff;
+        }
+        .field-item {
+            padding: 2px 8px;
+            font-size: 12px;
+            background: #fff;
+            border-top: 1px solid #ccc;
+            white-space: normal;
+            word-wrap: break-word;
+        }
+        .field-item.pk {
+            font-weight: bold;
+        }
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            overflow: visible;
+            z-index: 2;
+        }
+        .endpoint {
+            cursor: pointer;
+            fill: white;
+            stroke: black;
+            stroke-width: 1;
+        }
+        .endpoint.active {
+            fill: lightblue;
+        }
+        .endpoint-label {
+            font-size: 12px;
+            fill: black;
+            pointer-events: none;
+        }
+        .dragging {
+            box-shadow: 0 0 10px blue !important;
+        }
+    </style>
+</head>
+<body>
+<div id="diagram-container">
+    <div id="pan-overlay"></div>
+    <svg id="diagram-svg">
+        <defs>
+            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto" markerUnits="strokeWidth">
+                <polygon points="0 0, 10 3.5, 0 7" fill="black"/>
+            </marker>
+        </defs>
+    </svg>
+</div>
+<script>
+    let globalNodes = [];
+    let globalEdges = [];
+    let globalPan = { x: 0, y: 0 };
+    let nodeElements = {};
+    const DRAG_THRESHOLD = 5;
+
+    function getNodeHeight(node) {
+        if (!node.expanded) return 60;
+        let headerH = 30;
+        let keys = node.fields.filter(f => f.isPrimary);
+        let nonkeys = node.fields.filter(f => !f.isPrimary);
+        let keysH = keys.length > 0 ? 20 + keys.length * 20 : 0;
+        let fieldsH = nonkeys.length > 0 ? 20 + nonkeys.length * 20 : 0;
+        return headerH + keysH + fieldsH;
+    }
+
+    function parseDiagram(diagramText) {
+        const lines = diagramText.split('\n');
+        const nodes = [];
+        const edges = [];
+        let i = 0;
+        while (i < lines.length) {
+            let line = lines[i].trim();
+            if (line.startsWith("table")) {
+                const tableMatch = line.match(/^table\s+"?([^"]+)"?/i);
+                if (tableMatch) {
+                    let node = {
+                        label: tableMatch[1],
+                        fields: [],
+                        x: Math.random() * window.innerWidth,
+                        y: Math.random() * window.innerHeight,
+                        vx: 0,
+                        vy: 0,
+                        expanded: false,
+                        _dragging: false,
+                        width: 150,
+                        height: 60
+                    };
+                    if (line.indexOf("{") !== -1) {
+                        i++;
+                        while (i < lines.length && lines[i].indexOf("}") === -1) {
+                            let fieldLine = lines[i].trim();
+                            if (fieldLine !== "") {
+                                const fieldMatch = fieldLine.match(/^([^()]+)(\s*\(PK\))?/i);
+                                if (fieldMatch) {
+                                    node.fields.push({ name: fieldMatch[1].trim(), isPrimary: !!fieldMatch[2] });
+                                }
+                            }
+                            i++;
+                        }
+                    }
+                    nodes.push(node);
+                }
+            } else if (line.startsWith("arrow")) {
+                const arrowMatch = line.match(/^arrow\s+([^ ]+)\s*->\s*([^ ]+)$/i);
+                if (arrowMatch) {
+                    let fromParts = arrowMatch[1].split(".");
+                    let toParts = arrowMatch[2].split(".");
+                    edges.push({
+                        from: fromParts[0],
+                        fromField: fromParts.length > 1 ? fromParts[1] : "",
+                        to: toParts[0],
+                        toField: toParts.length > 1 ? toParts[1] : "",
+                        sourceState: "",
+                        targetState: ""
+                    });
+                }
+            }
+            i++;
+        }
+        return { nodes, edges };
+    }
+
+    function forceDirectedLayout(nodes, edges, width, height, iterations) {
+        let k = Math.sqrt((width * height) / nodes.length);
+        let damping = 0.85;
+        let dt = 0.5;
+        for (let iter = 0; iter < iterations; iter++) {
+            nodes.forEach(node => { node.fx = 0; node.fy = 0; });
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    let dx = nodes[i].x - nodes[j].x;
+                    let dy = nodes[i].y - nodes[j].y;
+                    let dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+                    let force = (k * k) / dist;
+                    let fx = (dx / dist) * force;
+                    let fy = (dy / dist) * force;
+                    nodes[i].fx += fx;
+                    nodes[i].fy += fy;
+                    nodes[j].fx -= fx;
+                    nodes[j].fy -= fy;
+                }
+            }
+            edges.forEach(edge => {
+                let source = nodes.find(n => n.label === edge.from);
+                let target = nodes.find(n => n.label === edge.to);
+                if (source && target) {
+                    let dx = target.x - source.x;
+                    let dy = target.y - source.y;
+                    let dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+                    let force = (dist * dist) / k;
+                    let fx = (dx / dist) * force;
+                    let fy = (dy / dist) * force;
+                    source.fx += fx;
+                    source.fy += fy;
+                    target.fx -= fx;
+                    target.fy -= fy;
+                }
+            });
+            nodes.forEach(node => {
+                node.vx = (node.vx + dt * node.fx) * damping;
+                node.vy = (node.vy + dt * node.fy) * damping;
+                node.x += node.vx * dt;
+                node.y += node.vy * dt;
+                node.x = Math.max(0, Math.min(width, node.x));
+                node.y = Math.max(0, Math.min(height, node.y));
+            });
+        }
+    }
+
+    function computeIntersection(cx, cy, dx, dy, halfWidth, halfHeight) {
+        if (dx === 0 && dy === 0) return { x: cx, y: cy };
+        let tX = dx !== 0 ? halfWidth / Math.abs(dx) : Infinity;
+        let tY = dy !== 0 ? halfHeight / Math.abs(dy) : Infinity;
+        let t = Math.min(tX, tY);
+        return { x: cx + dx * t, y: cy + dy * t };
+    }
+
+    function updateEdges() {
+        const svg = document.getElementById('diagram-svg');
+        while (svg.childNodes.length > 1) { svg.removeChild(svg.lastChild); }
+        const ns = "http://www.w3.org/2000/svg";
+        globalEdges.forEach(edge => {
+            const source = globalNodes.find(n => n.label === edge.from);
+            const target = globalNodes.find(n => n.label === edge.to);
+            if (source && target) {
+                const sourceWidth = source.width || 150;
+                const sourceHeight = source.height || 60;
+                const targetWidth = target.width || 150;
+                const targetHeight = target.height || 60;
+                let halfWSource = sourceWidth / 2, halfHSource = sourceHeight / 2;
+                let halfWTarget = targetWidth / 2, halfHTarget = targetHeight / 2;
+                let sCx = source.x + globalPan.x;
+                let sCy = source.y + globalPan.y;
+                let tCx = target.x + globalPan.x;
+                let tCy = target.y + globalPan.y;
+                let dxSource = tCx - sCx;
+                let dySource = tCy - sCy;
+                const sourcePt = computeIntersection(sCx, sCy, dxSource, dySource, halfWSource, halfHSource);
+                let dxTarget = sCx - tCx;
+                let dyTarget = sCy - tCy;
+                const targetPt = computeIntersection(tCx, tCy, dxTarget, dyTarget, halfWTarget, halfHTarget);
+                const line = document.createElementNS(ns, "line");
+                line.setAttribute('x1', sourcePt.x);
+                line.setAttribute('y1', sourcePt.y);
+                line.setAttribute('x2', targetPt.x);
+                line.setAttribute('y2', targetPt.y);
+                line.setAttribute('stroke', 'black');
+                line.setAttribute('stroke-width', '2');
+                line.setAttribute('marker-end', 'url(#arrowhead)');
+                svg.appendChild(line);
+            }
+        });
+    }
+
+    function updateNodes() {
+        globalNodes.forEach(node => {
+            const el = nodeElements[node.label];
+            if (el) {
+                let width = node.width || el.offsetWidth;
+                let height = node.height || el.offsetHeight;
+                el.style.left = (node.x - width / 2 + globalPan.x) + 'px';
+                el.style.top = (node.y - height / 2 + globalPan.y) + 'px';
+            }
+        });
+    }
+
+    function measureNodes() {
+        globalNodes.forEach(node => {
+            const el = nodeElements[node.label];
+            if (el) {
+                node.width = el.offsetWidth;
+                node.height = el.offsetHeight;
+            }
+        });
+    }
+
+    function renderNode(node) {
+        let el = nodeElements[node.label];
+        if (!el) return;
+        el.innerHTML = "";
+        let header = document.createElement("div");
+        header.className = "table-header";
+        header.textContent = node.label;
+        el.appendChild(header);
+        let btn = document.createElement("div");
+        btn.className = "expand-btn";
+        btn.textContent = node.expanded ? "–" : "+";
+        btn.addEventListener("click", function(e) {
+            e.stopPropagation();
+            node.expanded = !node.expanded;
+            renderNode(node);
+            measureNodes();
+            updateEdges();
+            updateNodes();
+        });
+        header.appendChild(btn);
+        if (!node.expanded) return;
+        let keys = node.fields.filter(f => f.isPrimary);
+        let nonkeys = node.fields.filter(f => !f.isPrimary);
+        if (keys.length > 0) {
+            let keysSection = document.createElement("div");
+            keysSection.className = "section keys-section visible";
+            let keysHeader = document.createElement("div");
+            keysHeader.className = "section-header";
+            keysHeader.textContent = "Keys";
+            keysSection.appendChild(keysHeader);
+            keys.forEach(field => {
+                let item = document.createElement("div");
+                item.className = "field-item pk";
+                item.textContent = field.name + " (PK)";
+                keysSection.appendChild(item);
+            });
+            el.appendChild(keysSection);
+        }
+        if (nonkeys.length > 0) {
+            let fieldsSection = document.createElement("div");
+            fieldsSection.className = "section fields-section visible";
+            let fieldsHeader = document.createElement("div");
+            fieldsHeader.className = "section-header";
+            fieldsHeader.textContent = "Fields";
+            fieldsSection.appendChild(fieldsHeader);
+            nonkeys.forEach(field => {
+                let item = document.createElement("div");
+                item.className = "field-item";
+                item.textContent = field.name;
+                fieldsSection.appendChild(item);
+            });
+            el.appendChild(fieldsSection);
+        }
+    }
+
+    function makeDraggable(el, label) {
+        let offset = { x: 0, y: 0 };
+        let dragOffset = { x: 0, y: 0 };
+        let dragStarted = false;
+        let startX = 0, startY = 0;
+        function onDragStart(e) {
+            e.preventDefault();
+            dragStarted = false;
+            startX = e.type.startsWith("touch") ? e.touches[0].clientX : e.clientX;
+            startY = e.type.startsWith("touch") ? e.touches[0].clientY : e.clientY;
+            el.classList.add("dragging");
+            let node = globalNodes.find(n => n.label === label);
+            if (node) node._dragging = false;
+            if (e.type.startsWith("touch")) {
+                offset.x = e.touches[0].clientX - el.offsetLeft;
+                offset.y = e.touches[0].clientY - el.offsetTop;
+                dragOffset.x = offset.x - el.offsetWidth / 2;
+                dragOffset.y = offset.y - el.offsetHeight / 2;
+                document.addEventListener("touchmove", onDragging, { passive: false });
+                document.addEventListener("touchend", onDragEnd);
+            } else {
+                offset.x = e.clientX - el.offsetLeft;
+                offset.y = e.clientY - el.offsetTop;
+                dragOffset.x = offset.x - el.offsetWidth / 2;
+                dragOffset.y = offset.y - el.offsetHeight / 2;
+                document.addEventListener("mousemove", onDragging);
+                document.addEventListener("mouseup", onDragEnd);
+            }
+        }
+        function onDragging(e) {
+            e.preventDefault();
+            let currentX = e.type.startsWith("touch") ? e.touches[0].clientX : e.clientX;
+            let currentY = e.type.startsWith("touch") ? e.touches[0].clientY : e.clientY;
+            if (!dragStarted && (Math.abs(currentX - startX) > DRAG_THRESHOLD || Math.abs(currentY - startY) > DRAG_THRESHOLD)) {
+                dragStarted = true;
+                let node = globalNodes.find(n => n.label === label);
+                if (node) node._dragging = true;
+            }
+            let newLeft = currentX - offset.x;
+            el.style.left = newLeft + "px";
+            let newTop = currentY - offset.y;
+            el.style.top = newTop + "px";
+            let node = globalNodes.find(n => n.label === label);
+            if (node) {
+                node.x = currentX - dragOffset.x - globalPan.x;
+                node.y = currentY - dragOffset.y - globalPan.y;
+            }
+            updateEdges();
+        }
+        function onDragEnd(e) {
+            el.classList.remove("dragging");
+            let node = globalNodes.find(n => n.label === label);
+            if (node) node._dragging = false;
+            document.removeEventListener("mousemove", onDragging);
+            document.removeEventListener("mouseup", onDragEnd);
+            document.removeEventListener("touchmove", onDragging);
+            document.removeEventListener("touchend", onDragEnd);
+            measureNodes();
+            updateEdges();
+            updateNodes();
+        }
+        el.addEventListener("mousedown", onDragStart);
+        el.addEventListener("touchstart", onDragStart, { passive: false });
+    }
+
+    function makePanable() {
+        const container = document.getElementById("diagram-container");
+        function onPanStart(e) {
+            if (e.target === container || e.target.id === "pan-overlay") {
+                let panStart = {
+                    x: e.type.startsWith("touch") ? e.touches[0].clientX : e.clientX,
+                    y: e.type.startsWith("touch") ? e.touches[0].clientY : e.clientY
+                };
+                let startPan = { x: globalPan.x, y: globalPan.y };
+                container.style.cursor = "grabbing";
+                function onPanning(e2) {
+                    let currentX = e2.type.startsWith("touch") ? e2.touches[0].clientX : e2.clientX;
+                    let currentY = e2.type.startsWith("touch") ? e2.touches[0].clientY : e2.clientY;
+                    globalPan.x = startPan.x + (currentX - panStart.x);
+                    globalPan.y = startPan.y + (currentY - panStart.y);
+                    updateNodes();
+                    updateEdges();
+                }
+                function onPanEnd() {
+                    container.style.cursor = "default";
+                    document.removeEventListener("mousemove", onPanning);
+                    document.removeEventListener("mouseup", onPanEnd);
+                    document.removeEventListener("touchmove", onPanning);
+                    document.removeEventListener("touchend", onPanEnd);
+                }
+                if (e.type.startsWith("touch")) {
+                    document.addEventListener("touchmove", onPanning, { passive: false });
+                    document.addEventListener("touchend", onPanEnd);
+                } else {
+                    document.addEventListener("mousemove", onPanning);
+                    document.addEventListener("mouseup", onPanEnd);
+                }
+            }
+        }
+        container.addEventListener("mousedown", onPanStart);
+        container.addEventListener("touchstart", onPanStart, { passive: false });
+    }
+
+    function renderDiagram(diagramText) {
+        const container = document.getElementById('diagram-container');
+        const svg = document.getElementById('diagram-svg');
+        Array.from(container.children).forEach(child => {
+            if (child.id !== "pan-overlay" && child.id !== "diagram-svg") {
+                container.removeChild(child);
+            }
+        });
+        while (svg.firstChild) { svg.removeChild(svg.firstChild); }
+        const ns = "http://www.w3.org/2000/svg";
+        const defs = document.createElementNS(ns, "defs");
+        const marker = document.createElementNS(ns, "marker");
+        marker.setAttribute('id', 'arrowhead');
+        marker.setAttribute('markerWidth', '10');
+        marker.setAttribute('markerHeight', '7');
+        marker.setAttribute('refX', '10');
+        marker.setAttribute('refY', '3.5');
+        marker.setAttribute('orient', 'auto');
+        marker.setAttribute('markerUnits', 'strokeWidth');
+        const polygon = document.createElementNS(ns, "polygon");
+        polygon.setAttribute('points', '0 0, 10 3.5, 0 7');
+        polygon.setAttribute('fill', 'black');
+        marker.appendChild(polygon);
+        defs.appendChild(marker);
+        svg.appendChild(defs);
+        const parsed = parseDiagram(diagramText);
+        globalNodes = parsed.nodes;
+        globalEdges = parsed.edges;
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+        forceDirectedLayout(globalNodes, globalEdges, width, height, 500);
+        nodeElements = {};
+        globalNodes.forEach(node => {
+            let el = document.createElement('div');
+            el.className = 'diagram-box';
+            const collapsedHeight = 60;
+            el.textContent = node.label;
+            el.style.left = (node.x - 150 / 2 + globalPan.x) + 'px';
+            el.style.top = (node.y - collapsedHeight / 2 + globalPan.y) + 'px';
+            container.appendChild(el);
+            nodeElements[node.label] = el;
+            renderNode(node);
+            makeDraggable(el, node.label);
+        });
+        svg.setAttribute('width', width);
+        svg.setAttribute('height', height);
+        measureNodes();
+        updateEdges();
+        makePanable();
+    }
+
+    const diagramText = `%%DIAGRAM_TEXT%%`;
+    renderDiagram(diagramText);
+</script>
+</body>
+</html>
